@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Clash Royale — Lite (Single-file)</title>
+  <style>
+    :root{--bg:#0b1720;--panel:#0f2633;--accent:#ffb86b;--text:#dbe7ee}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#07121a 0%, #081827 100%);font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    #app{display:flex;gap:12px;padding:12px;height:100%;box-sizing:border-box}
+    #game{flex:1;background:linear-gradient(180deg,#0e2632,#08222b);border-radius:12px;padding:8px;display:flex;flex-direction:column}
+    #arena{flex:1;background:linear-gradient(180deg,#0b3b4e,#063041);border-radius:8px;position:relative;overflow:hidden}
+    canvas{width:100%;height:100%;display:block}
+    #sidebar{width:360px;background:var(--panel);border-radius:12px;padding:12px;color:var(--text);box-sizing:border-box}
+    .card-row{display:flex;gap:8px;margin-top:8px}
+    .card{background:#0d394a;padding:8px;border-radius:8px;flex:1;text-align:center;cursor:pointer;user-select:none}
+    .card.cool{opacity:.45;cursor:not-allowed}
+    .hud{display:flex;justify-content:space-between;align-items:center}
+    .tower{position:absolute;width:64px;height:64px;border-radius:8px;background:#b44747;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+    .tower.enemy{background:#3f8bb4}
+    .toast{position:absolute;left:50%;transform:translateX(-50%);top:8px;background:rgba(0,0,0,.45);padding:8px 14px;border-radius:8px;color:#fff}
+    footer{font-size:12px;color:#9fb0bd;margin-top:8px}
+    .controls{display:flex;gap:8px;margin-top:10px}
+    button{background:var(--accent);border:0;padding:8px 10px;border-radius:8px;font-weight:700;cursor:pointer}
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="game">
+    <div class="hud">
+      <div>
+        <strong>Your Towers</strong>
+      </div>
+      <div id="timer">60</div>
+      <div>
+        <strong>Enemy Towers</strong>
+      </div>
+    </div>
+    <div id="arena">
+      <canvas id="c"></canvas>
+      <div id="toast" class="toast" style="display:none"></div>
+      <!-- towers will be drawn on canvas; DOM used only for toast -->
+    </div>
+    <footer>
+      Tip: Click a card then click the arena to deploy. This is a simplified single-player Clash Royale-like clone.
+    </footer>
+  </div>
+  <div id="sidebar">
+    <h3>Deck</h3>
+    <div id="deck" class="card-row"></div>
+    <div class="controls">
+      <button id="restart">Restart</button>
+      <button id="autoplay">Toggle AI Spawns</button>
+    </div>
+    <div style="margin-top:12px">
+      <h4>Game Info</h4>
+      <div id="info">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Clash Royale Lite — Single-file HTML/JS
+// Author: ChatGPT (demo). Use responsibly. This is a single-player local clone (no network features).
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W=0,H=0;
+function resize(){canvas.width=canvas.clientWidth*devicePixelRatio;canvas.height=canvas.clientHeight*devicePixelRatio;W=canvas.width;H=canvas.height;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0)}
+new ResizeObserver(resize).observe(canvas);
+resize();
+
+// Game state
+const state = {
+  running:true,
+  time:60, // seconds
+  selectedCard:null,
+  aiAuto:true,
+}
+
+// Arena coords: two lanes (left/right)
+const arena = {x:0,y:0,w:canvas.clientWidth,h:canvas.clientHeight};
+
+// Entities: troops and towers
+let entities = [];
+let towers = [];
+
+function rand(min,max){return Math.random()*(max-min)+min}
+
+// Define cards
+const CARD_DEFS = [
+  {id:'knight',name:'Knight',hp:100,atk:20,spd:40,cost:3,range:20,size:18,color:'#f5d19a'},
+  {id:'archer',name:'Archer',hp:60,atk:15,spd:70,cost:2,range:120,size:12,color:'#9fe3ff'},
+  {id:'giant',name:'Giant',hp:300,atk:30,spd:25,cost:5,range:30,size:26,color:'#ff9a9a'},
+  {id:'minis',name:'Minis',hp:45,atk:10,spd:120,cost:1,range:18,size:10,color:'#b9ffb3'}
+];
+
+// Deck UI
+const deckEl = document.getElementById('deck');
+CARD_DEFS.forEach(card=>{
+  const el = document.createElement('div');el.className='card';el.id='card-'+card.id;el.innerHTML=`<div><strong>${card.name}</strong></div><div>Cost: ${card.cost}</div>`;
+  el.onclick = ()=>{ if (el.classList.contains('cool')) return; state.selectedCard=card; showToast('Selected '+card.name)};
+  deckEl.appendChild(el);
+});
+
+// simple cooldowns
+const cooldowns = {};
+function canPlay(card){return !(cooldowns[card.id] && cooldowns[card.id]>Date.now())}
+function startCooldown(card,ms=2000){cooldowns[card.id]=Date.now()+ms; updateDeckUI()}
+function updateDeckUI(){ CARD_DEFS.forEach(card=>{const el=document.getElementById('card-'+card.id); if(!canPlay(card)) el.classList.add('cool'); else el.classList.remove('cool')}) }
+
+// Setup towers
+function resetGame(){ entities = []; towers = []; state.time=60; state.selectedCard=null; state.running=true; updateInfo();
+  // positions: left & right towers (player bottom side)
+  const pad=60; const towerY = canvas.clientHeight - 120;
+  towers.push({id:'player-left',x:canvas.clientWidth*0.25-pad,y:towerY,hp:500,team:'player'});
+  towers.push({id:'player-right',x:canvas.clientWidth*0.75+pad-60,y:towerY,hp:500,team:'player'});
+  towers.push({id:'enemy-left',x:canvas.clientWidth*0.25-pad,y:60,hp:500,team:'enemy'});
+  towers.push({id:'enemy-right',x:canvas.clientWidth*0.75+pad-60,y:60,hp:500,team:'enemy'});
+  // reset cooldowns
+  for(let k in cooldowns) cooldowns[k]=0; updateDeckUI();
+}
+resetGame();
+
+function showToast(txt,ms=1500){ const t=document.getElementById('toast'); t.textContent=txt; t.style.display='block'; clearTimeout(t._to); t._to=setTimeout(()=>t.style.display='none',ms)}
+
+// Deploying troops
+canvas.addEventListener('click', (e)=>{
+  const rect=canvas.getBoundingClientRect(); const x=e.clientX-rect.left; const y=e.clientY-rect.top;
+  if(!state.selectedCard) return; const card=state.selectedCard; if(!canPlay(card)){ showToast('Card on cooldown'); state.selectedCard=null; return; }
+  // only allow deploying on player's half (bottom half)
+  if(y < canvas.clientHeight/2){ showToast('Place on your side (bottom)'); state.selectedCard=null; return; }
+  spawnTroop(card,'player',x,y); startCooldown(card,3000);
+  state.selectedCard=null; updateInfo();
+});
+
+// AI deploy: periodically spawn random cards on enemy side
+let lastAISpawn=0;
+function aiTick(dt){ if(!state.aiAuto) return; if(Date.now()-lastAISpawn>1500){ const card = CARD_DEFS[Math.floor(Math.random()*CARD_DEFS.length)]; // spawn near top
+  const x = Math.random()*canvas.clientWidth; const y = 40 + Math.random()*60; spawnTroop(card,'enemy',x,y); lastAISpawn=Date.now(); }}
+
+function spawnTroop(card,team,x,y){ const dir = (team==='player')?-1:1; const ent = {id:card.id+'-'+Date.now()+Math.random(),card,team,x,y,hp:card.hp,atkTimer:0,dir,speed:card.spd/60,size:card.size}; entities.push(ent); }
+
+// Simple collision & attack logic
+function findClosestTarget(ent){ // find enemy entities or towers
+  let best=null; let bestDist=1e9;
+  for(const t of towers){ if(t.team===ent.team) continue; const dx=t.x - ent.x; const dy=t.y - ent.y; const d=Math.hypot(dx,dy); if(d<bestDist){bestDist=d; best=t}};
+  for(const e of entities){ if(e.team===ent.team) continue; const d=Math.hypot(e.x-ent.x,e.y-ent.y); if(d<bestDist){bestDist=d; best=e; bestDist=d}};
+  return {target:best,dist:bestDist};
+}
+
+// Update loop
+let last=performance.now();
+function loop(now){ const dt = (now-last)/1000; last=now; if(!state.running) return; // update timer
+  state.time -= dt; if(state.time<=0){ state.running=false; determineWinner(); }
+  // AI
+  aiTick(dt);
+  // update entities
+  for(const e of entities){ // movement toward nearest enemy tower on opposite side if no close enemy
+    const info = findClosestTarget(e);
+    if(info.target && info.dist <= e.card.range){ // attack
+      e.atkTimer -= dt;
+      if(e.atkTimer <= 0){ info.target.hp -= e.card.atk; e.atkTimer = 1.0; }
+    } else {
+      // move forward
+      const targetY = (e.team==='player')?40:canvas.clientHeight-40; // go toward enemy side
+      const dx = 0; const dy = (targetY - e.y);
+      const mag = Math.hypot(dx,dy)||1;
+      e.y += Math.sign(dy)*e.speed*dt*60; // adjusted speed
+      // keep in bounds
+      e.x = Math.max(10, Math.min(canvas.clientWidth-10, e.x));
+    }
+  }
+  // remove dead entities and towers
+  entities = entities.filter(e=>{ if(e.hp<=0){ return false } return true });
+  towers = towers.filter(t=>{ if(t.hp<=0){ showToast(t.team==='player'? 'One of your towers fell!':'Enemy tower fell!',1200); return false } return true });
+  // update UI
+  updateInfo();
+  // render
+  render();
+  if(state.running) requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function determineWinner(){ const playerTowers = towers.filter(t=>t.team==='player').length; const enemyTowers = towers.filter(t=>t.team==='enemy').length; let res='Draw'; if(playerTowers>enemyTowers) res='You win!'; else if(playerTowers<enemyTowers) res='You lose'; showToast('Game over — '+res,4000);}
+
+function render(){ // clear
+  ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+  // draw grass/lanes
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  // arena background
+  ctx.fillStyle = 'rgba(10,30,40,0.5)'; ctx.fillRect(0,0,w,h);
+  // river line
+  ctx.strokeStyle='rgba(255,255,255,0.05)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+  // towers
+  for(const t of towers){ ctx.fillStyle = t.team==='player'?'#b44747':'#3f8bb4'; const size=64; ctx.fillRect(t.x-32,t.y-32,size,size); ctx.fillStyle='#fff'; ctx.font='12px sans-serif'; ctx.fillText(Math.max(0,Math.round(t.hp)),t.x-14,t.y+4); }
+  // entities
+  for(const e of entities){ ctx.fillStyle=e.card.color; ctx.beginPath(); ctx.arc(e.x,e.y,e.card.size,0,Math.PI*2); ctx.fill(); ctx.fillStyle='#000'; ctx.font='10px sans-serif'; ctx.fillText(Math.round(e.hp), e.x-10, e.y+3); }
+  // draw selected card preview
+  if(state.selectedCard){ ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.beginPath(); ctx.arc(lastMouse.x,lastMouse.y,state.selectedCard.size,0,Math.PI*2); ctx.fill(); }
+}
+
+// input helpers
+const lastMouse={x:0,y:0};
+canvas.addEventListener('mousemove',(e)=>{const r=canvas.getBoundingClientRect(); lastMouse.x=e.clientX-r.left; lastMouse.y=e.clientY-r.top});
+
+// info panel update
+function updateInfo(){ const info=document.getElementById('info'); info.innerHTML = `Time: ${Math.max(0,Math.floor(state.time))}s<br>Troops: ${entities.length}<br>Towers (you): ${towers.filter(t=>t.team==='player').length} — (enemy): ${towers.filter(t=>t.team==='enemy').length}`; document.getElementById('timer').textContent = Math.max(0,Math.floor(state.time)); }
+
+// restart button
+document.getElementById('restart').onclick=()=>{ resetGame(); state.running=true; last=performance.now(); requestAnimationFrame(loop); showToast('Game restarted') }
+// autoplay toggle
+document.getElementById('autoplay').onclick=()=>{ state.aiAuto=!state.aiAuto; showToast('AI spawn: '+(state.aiAuto?'ON':'OFF')) }
+
+// basic autoscaling when window resizes: reposition towers
+new ResizeObserver(()=>{ resetGame(); }).observe(document.getElementById('app'));
+
+// friendly note in console
+console.log('Clash Royale Lite loaded. Save this file as index.html and host somewhere static (GitHub Pages, netlify, etc.). Do not attempt to bypass school restrictions.');
+
+</script>
+</body>
+</html>
